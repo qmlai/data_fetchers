@@ -1,25 +1,20 @@
 from lxml import etree
-from pathlib import Path
-from functools import reduce
-from dotenv import load_dotenv
 from entsoe import EntsoeRawClient
 from collections.abc import Callable
 from pandas.tseries.offsets import DateOffset
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from .constants import (BASE_DATA_DIR, MAX_RETRIES, NEIGHBOURS, CURVE_SCHEMA, 
+
+from .base import DataFetcherBase
+from .constants import (ENSTOE_BASE_DATA_DIR, MAX_RETRIES, NEIGHBOURS, CURVE_SCHEMA, 
                       ENTSOE_ZONE_CODES, WRITE_RETRY_SECONDS, FREQUENCIES)
 
-import os
 import io
 import zipfile
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
-import pyarrow.dataset as ds
-import pyarrow.compute as pc
 
-class EntsoeDataFetcher:
+class EntsoeDataFetcher(DataFetcherBase):
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.client  = EntsoeRawClient(api_key=api_key)
@@ -406,69 +401,11 @@ class EntsoeDataFetcher:
             "day": days,
         }, schema=CURVE_SCHEMA)
 
-    def _partition_dir(self, base: Path, market: str, curve_type: str, year: int, month: int, day: int) -> Path:
-        return base / f"market={market}" / f"curve_type={curve_type}" / f"year={year:04d}" / f"month={month:02d}" / f"day={day:02d}"
-
-    def ensure_dir(self, p: Path):
-        p.mkdir(parents=True, exist_ok=True)
-
-    def store_table_idempotent(self, table: pa.Table, market: str, base: Path = BASE_DATA_DIR):
-        """
-        Write a pyarrow Table into the dataset partitioned by market/curve_type/year/month/day.
-        If the partition already exists, read existing data, merge, deduplicate and overwrite.
-        """
-        if table.num_rows == 0:
-            return
-
-        # Convert to pandas for easy groupby / dedupe (per-day tables are small)
-        df = table.to_pandas()
-        
-        # ensure timestamp tz-aware
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-
-        # ensure necessary columns exist
-        for col in ["market", "curve_type", "year", "month", "day"]:
-            if col not in df.columns:
-                raise ValueError(f"Missing required column {col} in table")
-
-        # group by partitions
-        grp_cols = ["market", "curve_type", "year", "month", "day"]
-        for (market, curve_type, year, month, day), g in df.groupby(grp_cols):
-            part_dir = self._partition_dir(base, market, curve_type, int(year), int(month), int(day))
-            self.ensure_dir(part_dir)
-            out_file = part_dir / "data.parquet"
-
-            if out_file.exists():
-                try:
-                    existing = pd.read_parquet(out_file)
-                    # normalize timestamp
-                    existing["timestamp"] = pd.to_datetime(existing["timestamp"], utc=True) if existing["timestamp"].dt.tz is None else pd.to_datetime(existing["timestamp"], utc=True)
-                    combined = pd.concat([existing, g], ignore_index=True)
-                except Exception:
-                    combined = g.copy()
-            else:
-                combined = g.copy()
-
-            # dedupe on (market, curve_type, production_type, neighbour, timestamp)
-            combined = combined.drop_duplicates(subset=["market", "curve_type", "production_type", "neighbour", "timestamp"], keep="last")
-            combined = combined.sort_values(by="timestamp")
-
-            # write combined back (overwrite)
-            # remove older files in partition dir
-            for f in part_dir.glob("*.parquet"):
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
-
-            out_table = pa.Table.from_pandas(combined, schema=CURVE_SCHEMA, preserve_index=False)
-            pq.write_table(out_table, out_file)
-
     #-------------------------------------------------------------
     #                       Fetchers
     #-------------------------------------------------------------
 
-    def _with_retries(self, fn: Callable, *args, max_retries: int = MAX_RETRIES, retry_seconds: int = WRITE_RETRY_SECONDS, **kwargs):
+    def _with_retries(self, fn: Callable, *args, max_retries: int, retry_seconds: int, **kwargs):
         last_exc = None
         for attempt in range(1, max_retries + 1):
             try:
@@ -484,39 +421,39 @@ class EntsoeDataFetcher:
                 else:
                     raise
         raise last_exc
-
+    
     def _fetch_xml(self, fn: Callable, *args, **kwargs) -> str:
         return self._with_retries(fn, *args, **kwargs)
 
     def fetch_day_ahead_prices(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
-            xml = self._fetch_xml(self.client.query_day_ahead_prices, zone, start, end)
+            xml = self._fetch_xml(self.client.query_day_ahead_prices, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
             t = self.parse_day_ahead_prices(xml)
-            self.store_table_idempotent(t, zone)
+            self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
         except Exception as e:
             print(f"[WARN] DA prices {zone} {start}-{end} failed: {e}")
         
     def fetch_balancing_prices(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
-            xml = self._fetch_xml(self.client.query_imbalance_prices, zone, start, end)
+            xml = self._fetch_xml(self.client.query_imbalance_prices, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
             t = self.parse_balancing_prices_from_zip(xml, zone)
-            self.store_table_idempotent(t, zone)
+            self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
         except Exception as e:
             print(f"[WARN] Balancing prices {zone} {start}-{end} failed: {e}")
 
     def fetch_load_forecast(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
-            xml = self._fetch_xml(self.client.query_load_forecast, zone, start, end)
+            xml = self._fetch_xml(self.client.query_load_forecast, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
             t = self.parse_load_forecast(xml)
-            self.store_table_idempotent(t, zone)
+            self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
         except Exception as e:
             print(f"[WARN] load forecast {zone} {start}-{end} failed: {e}")
         
     def fetch_generation_forecast(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
-            xml = self._fetch_xml(self.client.query_generation_forecast, zone, start, end)
+            xml = self._fetch_xml(self.client.query_generation_forecast, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
             t = self.parse_generation_forecast(xml)
-            self.store_table_idempotent(t, zone)
+            self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
         except Exception as e:
             print(f"[WARN] generation forecast {zone} {start}-{end} failed: {e}")
 
@@ -543,9 +480,9 @@ class EntsoeDataFetcher:
 
     def fetch_wind_solar_forecast(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
-            xml = self._fetch_xml(self.client.query_wind_and_solar_forecast, zone, start, end)
+            xml = self._fetch_xml(self.client.query_wind_and_solar_forecast, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
             t = self.parse_wind_solar_forecast(xml)
-            self.store_table_idempotent(t, zone) # TODO: split solar and wind
+            self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR) # TODO: split solar and wind
         except Exception as e:
             print(f"[WARN] wind/solar forecast {zone} {start}-{end} failed: {e}")
 
@@ -607,28 +544,4 @@ class EntsoeDataFetcher:
                 except Exception as e:
                     print(f"[WARN] Task {market} {task_start}-{task_end} failed: {e}")
 
-    def load_curves(self, base_dir: Path, market: str | None = None, curve_type: str | None = None, production_type: str | None = None, start: pd.Timestamp | None = None, end: pd.Timestamp | None = None) -> pd.DataFrame:
-        dataset = ds.dataset(base_dir, format="parquet", partitioning="hive")
-        filters = []
-
-        if market:
-            filters.append(pc.field("market") == market)
-        if curve_type:
-            filters.append(pc.field("curve_type") == curve_type)
-        if production_type:
-            filters.append(pc.field("production_type") == production_type)
-        if start:
-            start_ts = pd.to_datetime(start, utc=True)
-            filters.append(pc.field("timestamp") >= start_ts)
-        if end:
-            end_ts = pd.to_datetime(end, utc=True)
-            filters.append(pc.field("timestamp") <= end_ts)
-
-        if filters:
-            filter_expr = reduce(lambda a, b: a & b, filters)
-            table = dataset.to_table(filter=filter_expr)
-        else:
-            table = dataset.to_table()
-
-        return table.to_pandas()
-
+    

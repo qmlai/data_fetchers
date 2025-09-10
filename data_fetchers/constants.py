@@ -1,15 +1,20 @@
-from pathlib import Path
-
 import os
 import pyarrow as pa
 
-BASE_DATA_DIR = Path(os.getenv("ENTSOE_DATA_DIR", "data/curves_pyarrow"))
-BASE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+from pathlib import Path
 
-# Minimal retry settings
+# Data storage paths
+ENSTOE_BASE_DATA_DIR = Path(os.getenv("ENTSOE_DATA_DIR", "data/entsoe_curves"))
+ENSTOE_BASE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+ENERGINET_BASE_DATA_DIR = Path(os.getenv("ENERGINET_DATA_DIR", "data/energinet_curves"))
+ENERGINET_BASE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Retry settings
 WRITE_RETRY_SECONDS = 2
 MAX_RETRIES = 3
 
+# Curve schema
 CURVE_SCHEMA = pa.schema(
     [
         ("market", pa.string()),
@@ -20,6 +25,36 @@ CURVE_SCHEMA = pa.schema(
         ("value", pa.float64()),
         ("resolution", pa.string()),
         ("unit", pa.string()),
+        ("source", pa.string()),
+        ("year", pa.int32()),
+        ("month", pa.int32()),
+        ("day", pa.int32()),
+    ]
+)
+
+BALANCING_CURVE_SCHEMA = pa.schema(
+    [
+        ("market", pa.string()),
+        ("curve_type", pa.string()),
+        ("timestamp", pa.timestamp("us", tz="UTC")),
+
+        ("value", pa.float64()), # EUR / MWh
+
+        ("balancing_demand", pa.float64()), # MW
+        ("direction", pa.int64()),
+
+        # Automatic frequency restoration reserves
+        ("aFRR_up", pa.float64()), # MWh
+        ("aFRR_up_vwa", pa.float64()), # EUR / MWh
+        ("aFRR_down", pa.float64()), # MWh
+        ("aFRR_down_vwa", pa.float64()), # EUR / MWh
+
+        # Manual frequency restoration reserves
+        ("mFRR_marginal_price_up", pa.float64()), # EUR / MWh
+        ("mFRR_marginal_price_down", pa.float64()), # EUR / MWh
+        
+        ("resolution", pa.string()),
+        
         ("source", pa.string()),
         ("year", pa.int32()),
         ("month", pa.int32()),
