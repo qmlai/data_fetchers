@@ -24,8 +24,8 @@ It stores results as partitioned Parquet datasets (market/curve_type/year/month/
 ## Installation
 Clone the repository and install dependencies with Poetry:
 ```bash
-git clone https://github.com/your-org/entsoe-data-fetcher.git
-cd entsoe-data-fetcher
+git clone https://github.com/qmlai/data-fetchers.git
+cd data-fetchers
 ```
 
 ```bash
@@ -86,7 +86,7 @@ Each partition is deduplicated by (market, curve_type, production_type, neighbou
 Run scripts inside the Poetry environment:
 
 ```bash
-poetry run python examples/fetch_example.py
+poetry run python examples/entsoe_fetch.py
 ```
 
 Or start a shell inside the virtual environment:
@@ -96,5 +96,5 @@ poetry shell
 ```
 
 ```bash
-python examples/fetch_example.py
+python examples/entsoe_fetch.py
 ```
