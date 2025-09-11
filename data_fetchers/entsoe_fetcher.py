@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .base import DataFetcherBase
 from .constants import (ENSTOE_BASE_DATA_DIR, MAX_RETRIES, NEIGHBOURS, CURVE_SCHEMA, 
-                      ENTSOE_ZONE_CODES, WRITE_RETRY_SECONDS, FREQUENCIES)
+                      ENTSOE_CODES_TO_ZONES, ENTSOE_ZONES_TO_CODES, WRITE_RETRY_SECONDS, FREQUENCIES)
 
 import io
 import zipfile
@@ -39,8 +39,8 @@ class EntsoeDataFetcher(DataFetcherBase):
             out_domain = ts.find(".//ns:out_Domain.mRID", namespaces=ns).text
             price_unit = ts.find(".//ns:price_Measure_Unit.name", namespaces=ns).text
 
-            in_zone  = ENTSOE_ZONE_CODES[in_domain]
-            out_zone = ENTSOE_ZONE_CODES[out_domain]
+            in_zone  = ENTSOE_CODES_TO_ZONES[in_domain]
+            out_zone = ENTSOE_CODES_TO_ZONES[out_domain]
 
             for period in ts.xpath(".//ns:Period", namespaces=ns):
                 start_str = period.find(".//ns:timeInterval/ns:start", namespaces=ns).text
@@ -193,7 +193,7 @@ class EntsoeDataFetcher(DataFetcherBase):
             if out_domain_el is None or unit_el is None:
                 continue
 
-            out_zone = ENTSOE_ZONE_CODES[out_domain_el.text]
+            out_zone = ENTSOE_CODES_TO_ZONES[out_domain_el.text]
             unit = unit_el.text
 
             for period in ts.xpath(".//ns:Period", namespaces=ns):
@@ -250,7 +250,7 @@ class EntsoeDataFetcher(DataFetcherBase):
             in_domain_el = ts.find(".//ns:inBiddingZone_Domain.mRID", namespaces=ns)
             if in_domain_el is None:
                 continue
-            in_zone = ENTSOE_ZONE_CODES[in_domain_el.text]
+            in_zone = ENTSOE_CODES_TO_ZONES[in_domain_el.text]
             quantity_unit = ts.findtext(".//ns:quantity_Measure_Unit.name", namespaces=ns)
             business_type = ts.findtext(".//ns:businessType", namespaces=ns)
 
@@ -302,7 +302,7 @@ class EntsoeDataFetcher(DataFetcherBase):
         markets, years, months, days, prod_types = [], [], [], [], []
 
         for ts in root.xpath(".//ns:TimeSeries", namespaces=ns):
-            in_domain = ENTSOE_ZONE_CODES[ts.findtext(".//ns:inBiddingZone_Domain.mRID", namespaces=ns)]
+            in_domain = ENTSOE_CODES_TO_ZONES[ts.findtext(".//ns:inBiddingZone_Domain.mRID", namespaces=ns)]
             quantity_unit = ts.findtext(".//ns:quantity_Measure_Unit.name", namespaces=ns)
             psr_type = ts.findtext(".//ns:MktPSRType/ns:psrType", namespaces=ns) or "N/A"
 
@@ -355,8 +355,8 @@ class EntsoeDataFetcher(DataFetcherBase):
         markets, neighbours, years, months, days, prod_types = [], [], [], [], [], []
 
         for ts in root.xpath(".//ns:TimeSeries", namespaces=ns):
-            from_zone = ENTSOE_ZONE_CODES[ts.findtext(".//ns:in_Domain.mRID", namespaces=ns)]
-            to_zone = ENTSOE_ZONE_CODES[ts.findtext(".//ns:out_Domain.mRID", namespaces=ns)]
+            from_zone = ENTSOE_CODES_TO_ZONES[ts.findtext(".//ns:in_Domain.mRID", namespaces=ns)]
+            to_zone = ENTSOE_CODES_TO_ZONES[ts.findtext(".//ns:out_Domain.mRID", namespaces=ns)]
             quantity_unit = ts.findtext(".//ns:quantity_Measure_Unit.name", namespaces=ns)
             business_type = ts.findtext(".//ns:businessType", namespaces=ns)
 
@@ -458,12 +458,14 @@ class EntsoeDataFetcher(DataFetcherBase):
             print(f"[WARN] generation forecast {zone} {start}-{end} failed: {e}")
 
     def fetch_flows(self, market: str, start: pd.Timestamp, end: pd.Timestamp) -> pa.Table:
+        from_code = ENTSOE_ZONES_TO_CODES.get(market)
         flows_list = []
-        for neighbor in NEIGHBOURS.get(market):
+        for neighbour in NEIGHBOURS.get(market):
+            to_code = ENTSOE_ZONES_TO_CODES.get(neighbour)
             try:
                 xml = self.client.query_crossborder_flows(
-                    country_code_from=market,
-                    country_code_to=neighbor,
+                    country_code_from=from_code,
+                    country_code_to=to_code,
                     start=start,
                     end=end
                 )
@@ -471,7 +473,7 @@ class EntsoeDataFetcher(DataFetcherBase):
                 flows_list.append(df)
 
             except Exception as e:
-                print(f"[WARN] flow from {market} to {neighbor} for {start}-{end} failed or unavailable: {e}")
+                print(f"[WARN] flow from {market} to {neighbour} for {start}-{end} failed or unavailable: {e}")
 
         if flows_list:
             return pa.concat_tables(flows_list, ignore_index=True)
