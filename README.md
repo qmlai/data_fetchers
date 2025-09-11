@@ -1,9 +1,9 @@
-## ENTSO-E Data Fetcher
-EntsoeDataFetcher is a Python utility for downloading, parsing, and storing ENTSO-E market data (day-ahead prices, balancing, load forecasts, generation forecasts, wind/solar, and cross-border flows).
+## data_fetchers
+**data_fetchers** is a Python utility for downloading, parsing, and storing ENTSO-E and ENERGINET market data (day-ahead prices, balancing, load forecasts, generation forecasts, wind/solar, and cross-border flows).
 It stores results as partitioned Parquet datasets (market/curve_type/year/month/day) for efficient downstream analysis.
 
 ## Features
-- Fetch data from ENTSO-E Transparency API with retries & concurrent execution.
+- Fetch data from ENTSO-E and ENERGINET APIs with retries & concurrent execution.
 - Parse XML/ZIP responses into normalized PyArrow tables compliant with a shared schema (CURVE_SCHEMA).
 - Store data idempotently (deduplicated, partitioned by Hive-style directory structure).
 - Load filtered datasets efficiently via pyarrow.dataset.
