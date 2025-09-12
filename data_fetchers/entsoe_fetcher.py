@@ -1,12 +1,13 @@
 from lxml import etree
 from entsoe import EntsoeRawClient
+from entsoe.mappings import Area, NEIGHBOURS
 from collections.abc import Callable
 from pandas.tseries.offsets import DateOffset
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .base import DataFetcherBase
-from .constants import (ENSTOE_BASE_DATA_DIR, MAX_RETRIES, NEIGHBOURS, CURVE_SCHEMA, 
-                      ENTSOE_CODES_TO_ZONES, ENTSOE_ZONES_TO_CODES, WRITE_RETRY_SECONDS, FREQUENCIES)
+from .constants import (ENSTOE_BASE_DATA_DIR, MAX_RETRIES, CURVE_SCHEMA, 
+                      ENTSOE_CODES_TO_ZONES, WRITE_RETRY_SECONDS, FREQUENCIES)
 
 import io
 import zipfile
@@ -458,10 +459,10 @@ class EntsoeDataFetcher(DataFetcherBase):
             print(f"[WARN] generation forecast {zone} {start}-{end} failed: {e}")
 
     def fetch_flows(self, market: str, start: pd.Timestamp, end: pd.Timestamp) -> pa.Table:
-        from_code = ENTSOE_ZONES_TO_CODES.get(market)
+        from_code = Area[market]
         flows_list = []
         for neighbour in NEIGHBOURS.get(market):
-            to_code = ENTSOE_ZONES_TO_CODES.get(neighbour)
+            to_code = Area[neighbour]
             try:
                 xml = self.client.query_crossborder_flows(
                     country_code_from=from_code,
@@ -471,14 +472,11 @@ class EntsoeDataFetcher(DataFetcherBase):
                 )
                 df = self.parse_crossborder_flows(xml)
                 flows_list.append(df)
+                t = pa.concat_tables(flows_list, ignore_index=True)
+                self.store_table_idempotent(t, market=market, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
 
             except Exception as e:
                 print(f"[WARN] flow from {market} to {neighbour} for {start}-{end} failed or unavailable: {e}")
-
-        if flows_list:
-            return pa.concat_tables(flows_list, ignore_index=True)
-        
-        return pa.Table.from_pydict({c.name: [] for c in CURVE_SCHEMA})
 
     def fetch_wind_solar_forecast(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
