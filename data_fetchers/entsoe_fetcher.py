@@ -472,11 +472,13 @@ class EntsoeDataFetcher(DataFetcherBase):
                 )
                 df = self.parse_crossborder_flows(xml)
                 flows_list.append(df)
-                t = pa.concat_tables(flows_list, ignore_index=True)
-                self.store_table_idempotent(t, market=market, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
 
             except Exception as e:
                 print(f"[WARN] flow from {market} to {neighbour} for {start}-{end} failed or unavailable: {e}")
+        
+        if flows_list:        
+            t = pa.concat_tables(flows_list, ignore_index=True)
+            self.store_table_idempotent(t, market=market, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
 
     def fetch_wind_solar_forecast(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
@@ -544,4 +546,4 @@ class EntsoeDataFetcher(DataFetcherBase):
                 except Exception as e:
                     print(f"[WARN] Task {market} {task_start}-{task_end} failed: {e}")
 
-    
+a = []
