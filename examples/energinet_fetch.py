@@ -6,11 +6,11 @@ if __name__ == "__main__":
 
     fetcher = EnerginetDataFetcher()
     
-    markets = "DK1"
-    start   = pd.Timestamp(2020, 7, 30, tz="UTC").date().strftime("%Y-%m-%d")
-    end     = pd.Timestamp(2025, 8, 30, tz="UTC").date().strftime("%Y-%m-%d")
+    zone  = "DK1"
+    start = pd.Timestamp(2020, 7, 30, tz="UTC").date().strftime("%Y-%m-%d")
+    end   = pd.Timestamp(2025, 8, 30, tz="UTC").date().strftime("%Y-%m-%d")
     
-    fetcher.fetch_all_curves(market=markets, start=start, end=end)
+    fetcher.fetch_all_curves(market=zone, start=start, end=end)
     df = fetcher.load_curves(base_dir=ENERGINET_BASE_DATA_DIR, market="DK1")
     print(df.head())
 
