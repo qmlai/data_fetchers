@@ -16,5 +16,5 @@ if __name__ == "__main__":
     
     fetcher.fetch_data_concurrent(markets, start, end, max_workers=6)
     df = fetcher.load_curves(base_dir=ENSTOE_BASE_DATA_DIR, market="DK_1")
-
+    print(df.head())
     
