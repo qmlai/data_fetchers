@@ -1,4 +1,5 @@
 import os
+import pandas as pd
 import pyarrow as pa
 
 from pathlib import Path
@@ -36,7 +37,12 @@ BALANCING_CURVE_SCHEMA = pa.schema(
     [
         ("market", pa.string()),
         ("curve_type", pa.string()),
+        ("resolution", pa.string()),
+        ("source", pa.string()),
         ("timestamp", pa.timestamp("us", tz="UTC")),
+        ("year", pa.int32()),
+        ("month", pa.int32()),
+        ("day", pa.int32()),
         ("value", pa.float64()),  # EUR / MWh
         ("balancing_demand", pa.float64()),  # MW
         ("direction", pa.int64()),
@@ -48,13 +54,12 @@ BALANCING_CURVE_SCHEMA = pa.schema(
         # Manual frequency restoration reserves
         ("mFRR_marginal_price_up", pa.float64()),  # EUR / MWh
         ("mFRR_marginal_price_down", pa.float64()),  # EUR / MWh
-        ("resolution", pa.string()),
-        ("source", pa.string()),
-        ("year", pa.int32()),
-        ("month", pa.int32()),
-        ("day", pa.int32()),
+        
     ]
 )
+
+# Before this, use RegulatingBalancePowerdata
+REGULATING_CUTOFF_DATE = pd.Timestamp(2025, 3, 4, 13, 0, tz="UTC")  
 
 ENTSOE_CODES_TO_ZONES = {
     "10YDE-VE-------2": "DE_50HZ",
