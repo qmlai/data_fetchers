@@ -1,3 +1,4 @@
+import pytz
 import pyarrow as pa
 import pandas as pd
 import pyarrow.parquet as pq
@@ -10,6 +11,13 @@ from functools import reduce
 class DataFetcherBase:
     def __init__(self):
         pass
+
+    def timestamp_to_str(self, ts: pd.Timestamp) -> str:        
+        if ts.tzinfo is not None and ts.tzinfo != pytz.UTC:
+            ts = ts.tz_convert("UTC")
+        fmt = '%Y%m%d%H00'
+        ret_str = ts.round(freq='h').strftime(fmt)
+        return ret_str
 
     def _partition_dir(self, base: Path, market: str, curve_type: str, year: int, month: int, day: int) -> Path:
         return base / f"market={market}" / f"curve_type={curve_type}" / f"year={year:04d}" / f"month={month:02d}" / f"day={day:02d}"
@@ -30,7 +38,7 @@ class DataFetcherBase:
         
         # ensure timestamp tz-aware
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-
+        
         # ensure necessary columns exist
         table_cols = schema.names
         for col in table_cols:
@@ -58,7 +66,7 @@ class DataFetcherBase:
             subset_cols = ["market", "curve_type", "timestamp"]
             if "production_type" in table_cols:
                 subset_cols.append("production_type")
-            elif "neighbour" in table_cols:
+            if "neighbour" in table_cols:
                 subset_cols.append("neighbour")
 
             # dedupe on (market, curve_type, production_type, neighbour, timestamp)

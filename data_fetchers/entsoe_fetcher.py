@@ -11,13 +11,16 @@ from .constants import (ENSTOE_BASE_DATA_DIR, MAX_RETRIES, CURVE_SCHEMA,
 
 import io
 import zipfile
+import requests
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 
 class EntsoeDataFetcher(DataFetcherBase):
     def __init__(self, api_key: str):
-        self.api_key = api_key
+        self.api_key  = api_key
+        self.base_url = "https://web-api.tp.entsoe.eu/api"
+
         self.client  = EntsoeRawClient(api_key=api_key)
 
     #-------------------------------------------------------------
@@ -65,8 +68,8 @@ class EntsoeDataFetcher(DataFetcherBase):
                     days.append(t.day)
 
         if not timestamps:
-            return pa.Table.from_pydict({c.name: [] for c in CURVE_SCHEMA})
-        
+            return pa.Table.from_pydict({c.name:  pa.array([], type=c.type) for c in CURVE_SCHEMA})
+
         n = len(timestamps)
 
         return pa.table({
@@ -157,7 +160,7 @@ class EntsoeDataFetcher(DataFetcherBase):
                     days.append(t.day)
 
         if not timestamps:
-            return pa.Table.from_pydict({c.name: [] for c in CURVE_SCHEMA})
+            return pa.Table.from_pydict({c.name:  pa.array([], type=c.type) for c in CURVE_SCHEMA})
 
         n = len(timestamps)
 
@@ -218,7 +221,7 @@ class EntsoeDataFetcher(DataFetcherBase):
                     days.append(t.day)
 
         if not timestamps:
-            return pa.Table.from_pydict({c.name: [] for c in CURVE_SCHEMA})
+            return pa.Table.from_pydict({c.name:  pa.array([], type=c.type) for c in CURVE_SCHEMA})
 
         n = len(timestamps)
 
@@ -277,7 +280,7 @@ class EntsoeDataFetcher(DataFetcherBase):
                     days.append(t.day)
 
         if not timestamps:
-            return pa.Table.from_pydict({c.name: [] for c in CURVE_SCHEMA})
+            return pa.Table.from_pydict({c.name:  pa.array([], type=c.type) for c in CURVE_SCHEMA})
 
         n = len(timestamps)
         return pa.table({
@@ -329,7 +332,7 @@ class EntsoeDataFetcher(DataFetcherBase):
                     days.append(t.day)
 
         if not timestamps:
-            return pa.Table.from_pydict({c.name: [] for c in CURVE_SCHEMA})
+            return pa.Table.from_pydict({c.name:  pa.array([], type=c.type) for c in CURVE_SCHEMA})
 
         n = len(timestamps)
         return pa.table({
@@ -384,7 +387,7 @@ class EntsoeDataFetcher(DataFetcherBase):
                     days.append(t.day)
 
         if not timestamps:
-            return pa.Table.from_pydict({c.name: [] for c in CURVE_SCHEMA})
+            return pa.Table.from_pydict({c.name:  pa.array([], type=c.type) for c in CURVE_SCHEMA})
 
         n = len(timestamps)
         return pa.table({
@@ -461,22 +464,29 @@ class EntsoeDataFetcher(DataFetcherBase):
     def fetch_flows(self, market: str, start: pd.Timestamp, end: pd.Timestamp) -> pa.Table:
         from_code = Area[market]
         flows_list = []
-        for neighbour in NEIGHBOURS.get(market):
+        for neighbour in NEIGHBOURS[market]:
             to_code = Area[neighbour]
             try:
-                xml = self.client.query_crossborder_flows(
-                    country_code_from=from_code,
-                    country_code_to=to_code,
-                    start=start,
-                    end=end
-                )
+                params = {
+                        "securityToken": self.api_key,
+                        "documentType": "A11",
+                        "in_Domain": from_code,
+                        "out_Domain": to_code,
+                        "periodStart": self.timestamp_to_str(start),
+                        "periodEnd": self.timestamp_to_str(end)
+                }
+
+                r = requests.get(self.base_url, params=params)
+                r.raise_for_status()
+                xml = r.text
+                
                 df = self.parse_crossborder_flows(xml)
                 flows_list.append(df)
 
             except Exception as e:
                 print(f"[WARN] flow from {market} to {neighbour} for {start}-{end} failed or unavailable: {e}")
         
-        if flows_list:        
+        if flows_list:
             t = pa.concat_tables(flows_list, ignore_index=True)
             self.store_table_idempotent(t, market=market, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
 
@@ -510,30 +520,38 @@ class EntsoeDataFetcher(DataFetcherBase):
             current_start = current_end + pd.Timedelta(seconds=1)
         return periods
 
-    def fetch_market_chunk(self, market: str, start: pd.Timestamp, end: pd.Timestamp, fetch_fn: Callable = fetch_all_curves):
+    def fetch_market_chunk(self, market: str, start: pd.Timestamp, end: pd.Timestamp, fetch_fn: Callable | None = None):
         """
         Wrapper to fetch a single market/time chunk
         """
+        if not fetch_fn:
+            fetch_fn = self.fetch_all_curves
         try:
-            fetch_fn(self, market, start, end)
+            fetch_fn(market, start, end)
             print(f"[INFO] Completed {market} {start.date()} to {end.date()}")
         except Exception as e:
             print(f"[WARN] Failed {market} {start}-{end}: {e}")
 
-    def generate_fetch_tasks(self, markets: list[str], start: pd.Timestamp, end: pd.Timestamp, fetch_fn: Callable = fetch_all_curves) -> list:
+    def generate_fetch_tasks(self, markets: list[str], start: pd.Timestamp, end: pd.Timestamp, fetch_fn: Callable | None = None) -> list:
         """
         Generate tasks for all markets and all 3-month chunks
         """
+        if not fetch_fn:
+            fetch_fn = self.fetch_all_curves
+        
         tasks = []
         for market in markets:
             for start_chunk, end_chunk in self.split_date_range(start, end, months=3):
                 tasks.append((self.fetch_market_chunk, market, start_chunk, end_chunk, fetch_fn))
         return tasks
 
-    def fetch_data_concurrent(self, markets: list[str], start: pd.Timestamp, end: pd.Timestamp, max_workers: int = 6, fetch_fn: Callable = fetch_all_curves):
+    def fetch_data_concurrent(self, markets: list[str], start: pd.Timestamp, end: pd.Timestamp, max_workers: int = 6, fetch_fn: Callable | None = None ):
         """
         Concurrent executor for tasks
         """
+        if not fetch_fn:
+            fetch_fn = self.fetch_all_curves
+        
         tasks = self.generate_fetch_tasks(markets, start, end, fetch_fn=fetch_fn)
         print(f"[INFO] Total tasks: {len(tasks)}")
 
@@ -546,4 +564,3 @@ class EntsoeDataFetcher(DataFetcherBase):
                 except Exception as e:
                     print(f"[WARN] Task {market} {task_start}-{task_end} failed: {e}")
 
-a = []
