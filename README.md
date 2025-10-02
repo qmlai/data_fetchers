@@ -88,13 +88,3 @@ Run scripts inside the Poetry environment:
 ```bash
 poetry run python examples/entsoe_fetch.py
 ```
-
-Or start a shell inside the virtual environment:
-
-```bash
-poetry shell
-```
-
-```bash
-python examples/entsoe_fetch.py
-```
