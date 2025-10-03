@@ -1,10 +1,8 @@
 from lxml import etree
-from entsoe import EntsoeRawClient
 from entsoe.mappings import Area, NEIGHBOURS
 from collections.abc import Callable
 from pandas.tseries.offsets import DateOffset
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from .base import DataFetcherBase
 from .constants import (ENSTOE_BASE_DATA_DIR, MAX_RETRIES, CURVE_SCHEMA, 
                       ENTSOE_CODES_TO_ZONES, WRITE_RETRY_SECONDS, FREQUENCIES)
@@ -20,8 +18,6 @@ class EntsoeDataFetcher(DataFetcherBase):
     def __init__(self, api_key: str):
         self.api_key  = api_key
         self.base_url = "https://web-api.tp.entsoe.eu/api"
-
-        self.client  = EntsoeRawClient(api_key=api_key)
 
     #-------------------------------------------------------------
     #                       XML Parsers
@@ -87,7 +83,7 @@ class EntsoeDataFetcher(DataFetcherBase):
                     "day": days,
                     }, schema=CURVE_SCHEMA)
 
-    def parse_balancing_prices_from_zip(self, zip_bytes: bytes, market: str = "activated_balancing") -> pa.Table:
+    def parse_balancing_prices_from_zip(self, zip_bytes: bytes | str, market: str) -> pa.Table:
         """
         Parse ENTSO-E imbalance/balancing prices from a ZIP (returned by query_imbalance_prices).
         Returns a PyArrow table compatible with CURVE_SCHEMA.
@@ -96,14 +92,17 @@ class EntsoeDataFetcher(DataFetcherBase):
             return pa.Table.from_pydict({c.name: [] for c in CURVE_SCHEMA})
 
         tables = []
-
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-            for name in zf.namelist():
-                with zf.open(name) as f:
-                    xml_content = f.read()
-                    # parse each XML inside the ZIP
-                    t = self.parse_balancing_prices(xml_content, market)
-                    tables.append(t)
+        if isinstance(zip_bytes, bytes):
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                for name in zf.namelist():
+                    with zf.open(name) as f:
+                        xml_content = f.read()
+                        # parse each XML inside the ZIP
+                        t = self.parse_balancing_prices(xml_content, market)
+                        tables.append(t)
+        elif isinstance(zip_bytes, str):
+            t = self.parse_balancing_prices(zip_bytes, market)
+            tables.append(t)
 
         if not tables:
             return pa.Table.from_pydict({c.name: [] for c in CURVE_SCHEMA})
@@ -166,9 +165,9 @@ class EntsoeDataFetcher(DataFetcherBase):
 
         return pa.table({
             "market": np.full(n, market, dtype=object),
-            "curve_type": np.full(n, "activated_balancing_price", dtype=object),
+            "curve_type": np.full(n, "balancing_price", dtype=object),
             "neighbour": neighbours,
-            "production_type": np.full(n, "N/A", dtype=object),
+            "production_type": np.full(n, "A04", dtype=object),
             "timestamp": timestamps,
             "value": values,
             "resolution": resolutions,
@@ -298,7 +297,7 @@ class EntsoeDataFetcher(DataFetcherBase):
             "day": days,
         }, schema=CURVE_SCHEMA)
 
-    def parse_wind_solar_forecast(self, xml_string: str) -> pa.Table:
+    def parse_wind_solar_forecast(self, xml_string: str, psr_type: str) -> pa.Table:
         root = etree.fromstring(xml_string.encode("utf-8") if isinstance(xml_string, str) else xml_string)
         ns = {"ns": root.nsmap[None]}  
 
@@ -337,9 +336,9 @@ class EntsoeDataFetcher(DataFetcherBase):
         n = len(timestamps)
         return pa.table({
             "market": markets,
-            "curve_type": np.full(n, "intraday_wind_solar_forecast", dtype=object),
+            "curve_type": np.full(n, "day_ahead_wind_solar_forecast", dtype=object),
             "neighbour": np.full(n, "N/A", dtype=object),
-            "production_type": prod_types,
+            "production_type": np.full(n, psr_type, dtype=object),
             "timestamp": timestamps,
             "value": values,
             "resolution": resolutions,
@@ -426,12 +425,31 @@ class EntsoeDataFetcher(DataFetcherBase):
                     raise
         raise last_exc
     
+    def _fetch_from_api(self, params: dict) -> str:
+        r = requests.get(self.base_url, params=params)
+        r.raise_for_status()
+        xml = r.text
+
+        return xml        
+
     def _fetch_xml(self, fn: Callable, *args, **kwargs) -> str:
         return self._with_retries(fn, *args, **kwargs)
 
     def fetch_day_ahead_prices(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
-            xml = self._fetch_xml(self.client.query_day_ahead_prices, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+            market = Area[zone].value
+            params = {
+                    "securityToken": self.api_key,
+                    "documentType": "A44",
+                    "contract_MarketAgreement.Type": "A01", # Day ahead
+                    "in_Domain": market,
+                    "out_Domain": market,
+                    "periodStart": self.timestamp_to_str(start),
+                    "periodEnd": self.timestamp_to_str(end)
+            }
+
+            xml = self._fetch_xml(self._fetch_from_api, params, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+                
             t = self.parse_day_ahead_prices(xml)
             self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
         except Exception as e:
@@ -439,7 +457,17 @@ class EntsoeDataFetcher(DataFetcherBase):
         
     def fetch_balancing_prices(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
-            xml = self._fetch_xml(self.client.query_imbalance_prices, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+            market = Area[zone].value
+            params = {
+                    "securityToken": self.api_key,
+                    "documentType": "A85",
+                    "controlArea_Domain": market,
+                    "periodStart": self.timestamp_to_str(start),
+                    "periodEnd": self.timestamp_to_str(end)
+            }
+            
+            xml = self._fetch_xml(self._fetch_from_api, params, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+            
             t = self.parse_balancing_prices_from_zip(xml, zone)
             self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
         except Exception as e:
@@ -447,7 +475,18 @@ class EntsoeDataFetcher(DataFetcherBase):
 
     def fetch_load_forecast(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
-            xml = self._fetch_xml(self.client.query_load_forecast, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+            market = Area[zone].value
+            params = {
+                    "securityToken": self.api_key,
+                    "documentType": "A65",
+                    "processType": "A01",
+                    "outBiddingZone_Domain": market,
+                    "periodStart": self.timestamp_to_str(start),
+                    "periodEnd": self.timestamp_to_str(end),
+            }
+
+            xml = self._fetch_xml(self._fetch_from_api, params, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+            
             t = self.parse_load_forecast(xml)
             self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
         except Exception as e:
@@ -455,14 +494,25 @@ class EntsoeDataFetcher(DataFetcherBase):
         
     def fetch_generation_forecast(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
         try:
-            xml = self._fetch_xml(self.client.query_generation_forecast, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+            market = Area[zone].value
+            params = {
+                    "securityToken": self.api_key,
+                    "documentType": "A71",
+                    "processType": "A01",
+                    "in_Domain": market,
+                    "periodStart": self.timestamp_to_str(start),
+                    "periodEnd": self.timestamp_to_str(end),
+            }
+
+            xml = self._fetch_xml(self._fetch_from_api, params, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+            
             t = self.parse_generation_forecast(xml)
             self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
         except Exception as e:
             print(f"[WARN] generation forecast {zone} {start}-{end} failed: {e}")
 
-    def fetch_flows(self, market: str, start: pd.Timestamp, end: pd.Timestamp) -> pa.Table:
-        from_code = Area[market]
+    def fetch_cross_border_flows(self, market: str, start: pd.Timestamp, end: pd.Timestamp) -> pa.Table:
+        from_code = Area[market].value
         flows_list = []
         for neighbour in NEIGHBOURS[market]:
             to_code = Area[neighbour]
@@ -476,11 +526,37 @@ class EntsoeDataFetcher(DataFetcherBase):
                         "periodEnd": self.timestamp_to_str(end)
                 }
 
-                r = requests.get(self.base_url, params=params)
-                r.raise_for_status()
-                xml = r.text
-                
-                df = self.parse_crossborder_flows(xml)
+                xml = self._fetch_xml(self._fetch_from_api, params, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+                df  = self.parse_crossborder_flows(xml)
+
+                flows_list.append(df)
+
+            except Exception as e:
+                print(f"[WARN] flow from {market} to {neighbour} for {start}-{end} failed or unavailable: {e}")
+        
+        if flows_list:
+            t = pa.concat_tables(flows_list, ignore_index=True)
+            self.store_table_idempotent(t, market=market, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
+
+    def fetch_capacities_forecast(self, market: str, start: pd.Timestamp, end: pd.Timestamp) -> pa.Table:
+        from_code = Area[market].value
+        flows_list = []
+        for neighbour in NEIGHBOURS[market]:
+            to_code = Area[neighbour]
+            try:
+                params = {
+                        "securityToken": self.api_key,
+                        "documentType": "A61",
+                        "contract_MarketAgreement.Type": "A01", # Day ahead
+                        "in_Domain": from_code,
+                        "out_Domain": to_code,
+                        "periodStart": self.timestamp_to_str(start),
+                        "periodEnd": self.timestamp_to_str(end)
+                }
+
+                xml = self._fetch_xml(self._fetch_from_api, params, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+                df  = self.parse_crossborder_flows(xml)
+
                 flows_list.append(df)
 
             except Exception as e:
@@ -491,12 +567,27 @@ class EntsoeDataFetcher(DataFetcherBase):
             self.store_table_idempotent(t, market=market, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR)
 
     def fetch_wind_solar_forecast(self, zone: str, start: pd.Timestamp, end: pd.Timestamp):
-        try:
-            xml = self._fetch_xml(self.client.query_wind_and_solar_forecast, zone, start, end, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
-            t = self.parse_wind_solar_forecast(xml)
-            self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR) # TODO: split solar and wind
-        except Exception as e:
-            print(f"[WARN] wind/solar forecast {zone} {start}-{end} failed: {e}")
+        # B16 = Solar; B18 = Wind Offshore; B19 = Wind Onshore
+        psr_types = ["B16", "B18", "B19"]
+        for psr in psr_types:
+            try:
+                market = Area[zone].value
+                params = {
+                        "securityToken": self.api_key,
+                        "documentType": "A69",
+                        "processType": "A01",
+                        "in_Domain": market,
+                        "periodStart": self.timestamp_to_str(start),
+                        "periodEnd": self.timestamp_to_str(end),
+                        "psrType": psr
+                }
+
+                xml = self._fetch_xml(self._fetch_from_api, params, max_retries=MAX_RETRIES, retry_seconds=WRITE_RETRY_SECONDS)
+                
+                t = self.parse_wind_solar_forecast(xml, psr)
+                self.store_table_idempotent(t, market=zone, schema=CURVE_SCHEMA, base=ENSTOE_BASE_DATA_DIR) # TODO: split solar and wind
+            except Exception as e:
+                print(f"[WARN] wind/solar forecast {zone} {start}-{end} failed: {e}")
 
     def fetch_all_curves(self, market: str, start: pd.Timestamp, end: pd.Timestamp):
         self.fetch_day_ahead_prices(market, start, end)
@@ -504,7 +595,8 @@ class EntsoeDataFetcher(DataFetcherBase):
         self.fetch_load_forecast(market, start, end)
         self.fetch_generation_forecast(market, start, end)
         self.fetch_wind_solar_forecast(market, start, end)
-        self.fetch_flows(market, start, end)
+        self.fetch_cross_border_flows(market, start, end)
+        self.fetch_capacities_forecast(market, start, end)
 
         return None
 
